@@ -124,7 +124,7 @@ def register():
                         request.form["email"],
                         request.form["phone"],
                         role,
-                        phone_enc_key,   # ✅ 7th parameter
+                        phone_enc_key,  
                     ),
                 )
             conn.commit()
