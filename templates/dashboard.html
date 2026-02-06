@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f6f8; display: flex; margin: 0; }
+        .sidebar { width: 250px; background: #343a40; color: white; min-height: 100vh; padding: 20px; }
+        .sidebar a { display: block; color: #adb5bd; padding: 10px; text-decoration: none; }
+        .sidebar a:hover { color: white; }
+        .content { flex: 1; padding: 30px; }
+        .card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .log-terminal { background: #1e1e2f; color: #00ff00; padding: 15px; font-family: monospace; height: 200px; overflow-y: auto; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2>Portal</h2>
+    <p>User: {{ username }}</p>
+    <a href="/dashboard"><i class="fa fa-home"></i> Dashboard</a>
+    <a href="/notifications"><i class="fa fa-bell"></i> Alerts ({{ notif_count }})</a>
+    <a href="/feedback"><i class="fa fa-comment"></i> Feedback</a>
+    <a href="/logout"><i class="fa fa-sign-out-alt"></i> Logout</a>
+</div>
+
+<div class="content">
+    {% if role == 1 %}
+    <div class="card" style="border-left: 5px solid #d9534f;">
+        <h3>🛡️ Admin Security Center</h3>
+        <p>
+            Uploads: <b>{{ 'ENABLED' if uploads_allowed == 'TRUE' else 'DISABLED' }}</b>
+            <form action="/toggle_security" method="POST" style="display:inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" style="background:none; border:none; color:blue; text-decoration:underline; cursor:pointer;">[Toggle]</button>
+            </form>
+        </p>
+        
+        <h4>Live Audit Log</h4>
+        <div class="log-terminal">
+            {% for log in audit_logs %}
+            <div>
+                [{{ log[6].strftime('%H:%M:%S') }}] {{ log[1] }} - {{ log[7] }} (IP: {{ log[5] }})
+            </div>
+            {% else %}
+            <div>No logs found.</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>📩 User Feedback Reports</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>User</th>
+                    <th>Type</th>
+                    <th>Message</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in feedbacks %}
+                <tr>
+                    <td style="white-space:nowrap; color:gray;">{{ f[0].strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td style="font-weight:bold;">{{ f[3] }}</td>
+                    <td><span style="background:#e9ecef; padding:4px 8px; border-radius:4px; font-size:0.9em;">{{ f[1] }}</span></td>
+                    <td>{{ f[2] }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" style="text-align:center; color:gray;">No feedback received yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <div class="card">
+        <h3>Project Repository</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Milestones</th>
+                    <th>Link</th>
+                    {% if role != 3 %}<th>Student</th>{% endif %}
+                    {% if role < 3 %}<th>Actions</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in projects %}
+                <tr>
+                    <td>{{ p[1] }}</td>
+                    <td>
+                        {% for m in milestones[p[0]] %}
+                        <div>
+                            <a href="/toggle_milestone/{{ m[0] }}" style="text-decoration:none;">{{ '✅' if m[2] else '⬜' }}</a> {{ m[1] }}
+                        </div>
+                        {% endfor %}
+                        {% if role == 3 %}
+                        <form action="/add_milestone" method="POST" style="margin-top:5px;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="assign_id" value="{{ p[0] }}">
+                            <input type="text" name="task" placeholder="Task..." size="10">
+                            <button type="submit">+</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                    <td><a href="{{ p[3] }}" target="_blank">Code</a></td>
+                    {% if role != 3 %}<td><strong>{{ p[6] }}</strong></td>{% endif %}
+                    {% if role < 3 %}
+                    <td>
+                        <form action="/delete/{{ p[0] }}" method="POST" onsubmit="return confirm('Delete?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button style="color:red; background:none; border:none; cursor:pointer;">Delete</button>
+                        </form>
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="5">No projects.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if role == 3 and uploads_allowed == 'TRUE' %}
+    <div class="card">
+        <h3>Submit Project</h3>
+        <form action="/submit" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="text" name="title" placeholder="Title" required>
+            <input type="text" name="link" placeholder="GitHub Link" required>
+            <input type="text" name="desc" placeholder="Description">
+            <button type="submit">Submit</button>
+        </form>
+    </div>
+    {% endif %}
+</div>
+
+</body>
+</html>
