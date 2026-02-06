@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head><title>Notifications</title></head>
+<body style="font-family:sans-serif; padding:30px; background:#f4f6f8;">
+    <h2>🔔 Notifications</h2>
+    <a href="/dashboard">Back to Dashboard</a>
+    <hr>
+    {% for n in notifications %}
+        <div style="background:white; padding:15px; border-left:4px solid #007bff; margin-bottom:10px; border-radius:4px;">
+            <small style="color:gray;">{{ n[1].strftime('%Y-%m-%d %H:%M') }}</small><br>
+            {{ n[0] }}
+        </div>
+    {% else %}
+        <p>No new notifications.</p>
+    {% endfor %}
+</body>
+</html>
