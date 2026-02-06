@@ -26,16 +26,11 @@ variable "app_port" {
   default = 5000
 }
 
-variable "acm_cert_arn" {
-  description = "ARN of the ACM certificate for the ALB"
-  # Replace this default with your actual ARN or pass it via -var
-  default     = "arn:aws:acm:us-east-1:123456789012:certificate/PLACEHOLDER" 
-}
+# NOTE: HTTPS Certificate removed for Sandbox compatibility
 
 variable "ami_id" {
-  description = "Amazon Linux 2023 AMI ID"
-  # You should dynamically look this up or set a default for your region
-  default     = "ami-0230bd60aa48260c6" # Example AL2023 for us-east-1
+  description = "Amazon Linux 2023 AMI ID for us-east-1"
+  default     = "ami-05b10e08d247fb927" # Verified AL2023 ID
 }
 
 variable "instance_type" {
@@ -49,7 +44,7 @@ variable "asg_max" { default = 2 }
 # Secrets
 variable "flask_secret" {
   sensitive = true
-  default   = "change-me"
+  default   = "change-me-secret-key"
 }
 
 variable "phone_enc_key" {
