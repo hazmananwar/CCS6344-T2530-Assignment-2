@@ -1,1 +1,84 @@
 
+# cfn/root.yaml
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Root nested stack (Network -> Security -> Database -> ALB)
+
+Parameters:
+  # IMPORTANT:
+  # Nested stacks need TemplateURL to point to S3/HTTPS URL.
+  # For assignment, keep this as a placeholder.
+  BaseTemplateUrl:
+    Type: String
+    Default: https://YOUR-S3-BUCKET.s3.amazonaws.com/cfn
+    Description: Base URL where cfn templates are uploaded (e.g., https://bucket.s3.amazonaws.com/cfn)
+
+  AppPort:
+    Type: Number
+    Default: 5000
+
+  AcmCertArn:
+    Type: String
+    Default: arn:aws:acm:REGION:ACCOUNT:certificate/PLACEHOLDER
+    Description: ACM cert ARN (placeholder ok for documentation)
+
+  DbName:
+    Type: String
+    Default: StudentProjectDB
+  DbUsername:
+    Type: String
+    NoEcho: true
+  DbPassword:
+    Type: String
+    NoEcho: true
+  MultiAZ:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${BaseTemplateUrl}/network.yaml"
+      Parameters: {}
+
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${BaseTemplateUrl}/security.yaml"
+      Parameters:
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        AppPort: !Ref AppPort
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${BaseTemplateUrl}/database.yaml"
+      Parameters:
+        PrivateDbSubnet1Id: !GetAtt NetworkStack.Outputs.PrivateDbSubnet1Id
+        PrivateDbSubnet2Id: !GetAtt NetworkStack.Outputs.PrivateDbSubnet2Id
+        DbSecurityGroupId: !GetAtt SecurityStack.Outputs.DbSecurityGroupId
+        DbName: !Ref DbName
+        DbUsername: !Ref DbUsername
+        DbPassword: !Ref DbPassword
+        MultiAZ: !Ref MultiAZ
+
+  AlbStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${BaseTemplateUrl}/alb.yaml"
+      Parameters:
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnet1Id: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+        PublicSubnet2Id: !GetAtt NetworkStack.Outputs.PublicSubnet2Id
+        AlbSecurityGroupId: !GetAtt SecurityStack.Outputs.AlbSecurityGroupId
+        AppPort: !Ref AppPort
+        AcmCertArn: !Ref AcmCertArn
+
+Outputs:
+  VpcId:
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+  AlbDnsName:
+    Value: !GetAtt AlbStack.Outputs.AlbDnsName
+  DbEndpoint:
+    Value: !GetAtt DatabaseStack.Outputs.DbEndpoint
