@@ -1,17 +1,9 @@
 # Security Groups
 resource "aws_security_group" "alb_sg" {
   name        = "alb-sg"
-  description = "ALB SG - allow HTTPS from internet"
+  description = "ALB SG - allow HTTP from internet"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    protocol    = "tcp"
-    from_port   = 443
-    to_port     = 443
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  # Allow HTTP for redirect
   ingress {
     protocol    = "tcp"
     from_port   = 80
@@ -58,35 +50,4 @@ resource "aws_security_group" "db_sg" {
     to_port         = 3306
     security_groups = [aws_security_group.app_sg.id]
   }
-}
-
-# IAM Role & Instance Profile
-resource "aws_iam_role" "app_role" {
-  name = "student-portal-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ec2.amazonaws.com"
-      }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ssm_core" {
-  role       = aws_iam_role.app_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
-  role       = aws_iam_role.app_role.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-}
-
-resource "aws_iam_instance_profile" "app_profile" {
-  name = "student-portal-ec2-profile"
-  role = aws_iam_role.app_role.name
 }
