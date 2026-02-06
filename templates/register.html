@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Registration | Student Project Portal</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;
+        }
+        .register-container {
+            background: white; padding: 40px; border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 100%; max-width: 400px;
+        }
+        h2 { text-align: center; color: #2c3e50; margin-bottom: 30px; }
+        .form-group { margin-bottom: 20px; position: relative; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; color: #34495e; font-size: 14px; }
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%; padding: 12px; border: 1px solid #dcdfe6; border-radius: 6px; box-sizing: border-box;
+        }
+        .btn-register {
+            width: 100%; padding: 14px; background-color: #28a745; color: white; border: none;
+            border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer;
+        }
+        .footer-links { text-align: center; margin-top: 20px; font-size: 14px; }
+        .error-msg { background: #fef0f0; color: #f56c6c; padding: 10px; border-radius: 4px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+
+<div class="register-container">
+    <h2>Create Account</h2>
+
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            {% for message in messages %}
+                <div class="error-msg">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <form action="/register" method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="role" value="3">
+
+        <div class="form-group">
+            <label>Username</label>
+            <input type="text" name="username" placeholder="e.g. StudentID123" required>
+        </div>
+
+        <div class="form-group">
+            <label>Password</label>
+            <input type="password" name="password" id="regPass" placeholder="••••••••" required>
+            <div style="margin-top: 5px;">
+                <input type="checkbox" onclick="document.getElementById('regPass').type = document.getElementById('regPass').type === 'password' ? 'text' : 'password'">
+                <small>Show Password</small>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>Email Address</label>
+            <input type="email" name="email" placeholder="student@mmu.edu.my" required>
+        </div>
+
+        <div class="form-group">
+            <label>Phone Number</label>
+            <input type="text" name="phone" placeholder="012-3456789" required>
+        </div>
+
+        <div class="pdpa-box" style="margin-bottom:20px;">
+            <label style="display: flex; align-items: flex-start; font-weight: normal; font-size:12px;">
+                <input type="checkbox" name="consent" style="margin-top: 3px; margin-right:5px;" required>
+                <span>I consent to PDPA 2010 processing.</span>
+            </label>
+        </div>
+
+        <button type="submit" class="btn-register">Register Account</button>
+    </form>
+
+    <div class="footer-links">
+        Already have an account? <a href="/">Login here</a>
+    </div>
+</div>
+</body>
+</html>
