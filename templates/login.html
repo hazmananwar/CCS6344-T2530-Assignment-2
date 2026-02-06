@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Welcome | Student Project Portal</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { 
+            font-family: 'Segoe UI', sans-serif; margin: 0; height: 100vh;
+            background: linear-gradient(135deg, #4361ee 0%, #3a0ca3 100%);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .login-card {
+            background: white; width: 900px; display: flex; border-radius: 20px;
+            overflow: hidden; box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+        }
+        .login-hero {
+            flex: 1; background: #1e1e2f url('https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=800') center/cover;
+            padding: 40px; color: white; display: flex; flex-direction: column; justify-content: flex-end;
+            position: relative;
+        }
+        .login-hero::after { content: ""; position: absolute; inset: 0; background: rgba(58, 12, 163, 0.7); }
+        .hero-text { position: relative; z-index: 1; }
+        .login-form-side { flex: 1; padding: 60px; background: white; }
+        .input-group { margin-bottom: 20px; position: relative; }
+        .input-group i { position: absolute; left: 15px; top: 15px; color: #aaa; }
+        .input-group input { 
+            width: 100%; padding: 12px 15px 12px 45px; border: 1px solid #ddd; 
+            border-radius: 8px; box-sizing: border-box; outline: none; transition: 0.3s;
+        }
+        .input-group input:focus { border-color: #4361ee; box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1); }
+        .btn-login { 
+            width: 100%; padding: 14px; background: #4361ee; color: white; border: none; 
+            border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s;
+        }
+        .btn-login:hover { background: #3a0ca3; transform: translateY(-2px); }
+    </style>
+</head>
+<body>
+
+<div class="login-card">
+    <div class="login-hero">
+        <div class="hero-text">
+            <h2>Project Management Portal</h2>
+            <p>A secure, streamlined platform for MMU students and faculty to manage academic milestones and project repositories.</p>
+        </div>
+    </div>
+    <div class="login-form-side">
+        <h3>Account Login</h3>
+        <p style="color: #777; font-size: 0.9rem;">Enter your credentials to access your dashboard</p>
+        
+        <form method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="input-group">
+                <i class="fa fa-user"></i>
+                <input type="text" name="username" placeholder="Username" required>
+            </div>
+            <div class="input-group">
+                <i class="fa fa-lock"></i>
+                <input type="password" name="password" id="loginPass" placeholder="Password" required>
+            </div>
+            <button type="submit" class="btn-login">Sign In</button>
+        </form>
+        
+        <div style="text-align: center; margin-top: 25px;">
+            <span style="color: #888;">New here?</span> <a href="/register" style="color: #4361ee; text-decoration: none; font-weight: 600;">Create an Account</a>
+        </div>
+
+        {% with messages = get_flashed_messages() %}
+            {% if messages %} <p style="color: #e63946; text-align: center; margin-top: 15px; font-size: 0.85rem;">{{ messages[0] }}</p> {% endif %}
+        {% endwith %}
+    </div>
+</div>
+
+</body>
+</html>
