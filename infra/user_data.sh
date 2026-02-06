@@ -1,3 +1,4 @@
+cat > user_data.sh << 'EOF'
 #!/bin/bash
 set -e
 
@@ -11,12 +12,10 @@ mkdir -p /opt/student-portal/templates
 cd /opt/student-portal
 
 # --- 3. Install Python Dependencies ---
-# Note: You used flask_wtf, pymysql, etc.
 python3 -m pip install flask flask-wtf pymysql gunicorn cryptography
 
 # --- 4. Write app.py ---
-# We use 'EOF' (quoted) to prevent variable expansion ($) inside the python code
-cat > app.py << 'EOF'
+cat > app.py << 'PYEOF'
 from flask import Flask, render_template, request, redirect, session, url_for, flash, abort
 import pymysql
 import hashlib
@@ -28,20 +27,15 @@ from flask_wtf.csrf import CSRFProtect
 
 app = Flask(__name__)
 
-# =========================
-# Security / Session Config
-# =========================
+# Security Config
 app.secret_key = os.getenv("FLASK_SECRET", "dev_fallback_key")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-# In Sandbox HTTP, we must set Secure to False if not using SSL
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 csrf = CSRFProtect(app)
 
-# =========================
-# DB Connection MySQL
-# =========================
+# DB Connection
 def get_db():
     return pymysql.connect(
         host=os.getenv("DB_HOST", "127.0.0.1"),
@@ -54,9 +48,7 @@ def get_db():
         charset="utf8mb4",
     )
 
-# =========================
 # Utils
-# =========================
 def hash_password(password, salt=None):
     if not salt:
         salt = os.urandom(16).hex()
@@ -82,9 +74,7 @@ def role_required(*roles):
         return wrapper
     return deco
 
-# =========================
-# ROUTES
-# =========================
+# Routes
 @app.route("/")
 def home():
     return redirect(url_for("dashboard")) if "user_id" in session else redirect(url_for("login"))
@@ -95,7 +85,6 @@ def login():
         conn = get_db()
         try:
             with conn.cursor() as cursor:
-                # NOTE: Ensure Sec_sp_GetUserAuth exists in DB
                 cursor.execute("CALL Sec_sp_GetUserAuth(%s)", (request.form["username"],))
                 user = cursor.fetchone()
                 if user:
@@ -124,7 +113,7 @@ def register():
             return render_template("register.html")
 
         pwd_hash, salt = hash_password(request.form["password"])
-        role = 3  # Student
+        role = 3 
         phone_enc_key = os.getenv("PHONE_ENC_KEY", "change-me-phone-key")
 
         conn = get_db()
@@ -156,7 +145,6 @@ def register():
 @app.route("/dashboard")
 @role_required()
 def dashboard():
-    # Mock data for dashboard since DB schema for projects isn't fully clear yet
     return render_template("dashboard.html", 
                            username=session.get("username"), 
                            role=session.get("role"),
@@ -184,12 +172,12 @@ def logout():
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)
-EOF
+PYEOF
 
 # --- 5. Write HTML Templates ---
 
 # dashboard.html
-cat > templates/dashboard.html << 'EOF'
+cat > templates/dashboard.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -222,10 +210,10 @@ cat > templates/dashboard.html << 'EOF'
 </div>
 </body>
 </html>
-EOF
+HTMLEOF
 
 # login.html
-cat > templates/login.html << 'EOF'
+cat > templates/login.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -263,10 +251,10 @@ cat > templates/login.html << 'EOF'
 </div>
 </body>
 </html>
-EOF
+HTMLEOF
 
 # register.html
-cat > templates/register.html << 'EOF'
+cat > templates/register.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -298,22 +286,22 @@ cat > templates/register.html << 'EOF'
 </div>
 </body>
 </html>
-EOF
+HTMLEOF
 
 # notifications.html
-cat > templates/notifications.html << 'EOF'
+cat > templates/notifications.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html><head><title>Notifications</title></head><body><h2>Notifications</h2><a href="/dashboard">Back</a></body></html>
-EOF
+HTMLEOF
 
 # feedback.html
-cat > templates/feedback.html << 'EOF'
+cat > templates/feedback.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html><head><title>Feedback</title></head><body><h2>Feedback</h2><a href="/dashboard">Back</a></body></html>
-EOF
+HTMLEOF
 
 # --- 6. Environment Variables Setup ---
-cat > /etc/profile.d/student_portal_env.sh <<EOF
+cat > /etc/profile.d/student_portal_env.sh <<ENVEOF
 export FLASK_SECRET='${flask_secret}'
 export DB_HOST='${db_host}'
 export DB_NAME='${db_name}'
@@ -323,11 +311,11 @@ export DB_PORT='${db_port}'
 export PHONE_ENC_KEY='${phone_enc_key}'
 export PORT='${app_port}'
 export COOKIE_SECURE='false'
-EOF
+ENVEOF
 chmod 600 /etc/profile.d/student_portal_env.sh
 
 # --- 7. Create Systemd Service ---
-cat > /etc/systemd/system/student-portal.service <<EOF
+cat > /etc/systemd/system/student-portal.service <<serviceEOF
 [Unit]
 Description=Student Project Portal (Flask)
 After=network.target
@@ -343,7 +331,6 @@ Environment=DB_PASS=${db_pass}
 Environment=DB_PORT=${db_port}
 Environment=PHONE_ENC_KEY=${phone_enc_key}
 Environment=PORT=${app_port}
-# IMPORTANT: Secure cookie off for HTTP sandbox
 Environment=COOKIE_SECURE=false 
 ExecStart=/usr/local/bin/gunicorn -w 2 -b 0.0.0.0:${app_port} app:app
 Restart=always
@@ -351,8 +338,9 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-EOF
+serviceEOF
 
 systemctl daemon-reload
 systemctl enable student-portal.service
 systemctl start student-portal.service || true
+EOF
