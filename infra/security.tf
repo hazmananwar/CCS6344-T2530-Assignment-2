@@ -1,9 +1,21 @@
+# -----------------------------
 # Security Groups
+# -----------------------------
+
 resource "aws_security_group" "alb_sg" {
   name        = "alb-sg"
-  description = "ALB SG - allow HTTP from internet"
+  description = "ALB SG - allow HTTPS from internet"
   vpc_id      = aws_vpc.main.id
 
+  # HTTPS
+  ingress {
+    protocol    = "tcp"
+    from_port   = 443
+    to_port     = 443
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # HTTP (optional / redirect)
   ingress {
     protocol    = "tcp"
     from_port   = 80
@@ -49,5 +61,12 @@ resource "aws_security_group" "db_sg" {
     from_port       = 3306
     to_port         = 3306
     security_groups = [aws_security_group.app_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
