@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Feedback</title></head>
+<body style="font-family:sans-serif; padding:30px; background:#f4f6f8;">
+    <h2>📬 Report Issue / Feedback</h2>
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Type:</label>
+        <select name="type">
+            <option>Bug</option>
+            <option>Complaint</option>
+            <option>Suggestion</option>
+        </select><br><br>
+        <textarea name="msg" rows="5" cols="40" placeholder="Describe issue..."></textarea><br><br>
+        <button type="submit">Submit</button>
+    </form>
+    <br><a href="/dashboard">Cancel</a>
+</body>
+</html>
