@@ -3,8 +3,9 @@ resource "aws_launch_template" "app" {
   image_id      = var.ami_id
   instance_type = var.instance_type
 
+  # FIXED: Use the pre-existing Academy Role
   iam_instance_profile {
-    name = aws_iam_instance_profile.app_profile.name
+    name = "LabInstanceProfile"
   }
 
   vpc_security_group_ids = [aws_security_group.app_sg.id]
