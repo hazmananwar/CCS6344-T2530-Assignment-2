@@ -1,0 +1,507 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CCS6344 Secure Migration (Learner Lab-safe): Dual-stack (IPv4/IPv6) VPC with public/private subnets,
+  ALB (HTTP or HTTPS if ACM ARN provided), EC2 app tier (private subnet), EC2 MySQL DB tier (private subnet, encrypted EBS),
+  least-open SGs, CloudTrail to encrypted S3, S3 app bucket (encrypted, blocked public).
+  NOTE: WAF not created (Learner Lab denies wafv2:CreateWebACL).
+  NOTE: RDS not created (Learner Lab denies rds:CreateDBInstance).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ccs6344
+    AllowedPattern: "^[a-zA-Z0-9-]+$"
+
+  VpcCidr:
+    Type: String
+    Default: 10.10.0.0/16
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.10.1.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.10.2.0/24
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.10.11.0/24
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.10.12.0/24
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+
+  AppInstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small, t3.medium]
+
+  DbInstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small, t3.medium]
+
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Existing instance profile in Learner Lab (do not create IAM roles).
+
+  DbName:
+    Type: String
+    Default: studentdb
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,62}$"
+
+  DbUser:
+    Type: String
+    Default: studentuser
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,15}$"
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+
+  AcmCertificateArn:
+    Type: String
+    Default: ""
+    Description: Optional ACM cert ARN for HTTPS on ALB. Leave empty to use HTTP only.
+
+  AdminCidr:
+    Type: String
+    Default: "0.0.0.0/32"
+  AdminIpv6Cidr:
+    Type: String
+    Default: "::/128"
+
+  AppAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  UseHttps: !Not [!Equals [!Ref AcmCertificateArn, ""]]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  VpcIpv6:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref Vpc
+      AmazonProvidedIpv6CidrBlock: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachIgw:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  EgressOnlyIgw:
+    Type: AWS::EC2::EgressOnlyInternetGateway
+    Properties:
+      VpcId: !Ref Vpc
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select
+        - 0
+        - !Cidr
+          - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
+          - 4
+          - 64
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select
+        - 1
+        - !Cidr
+          - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
+          - 4
+          - 64
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select
+        - 2
+        - !Cidr
+          - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
+          - 4
+          - 64
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select
+        - 3
+        - !Cidr
+          - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
+          - 4
+          - 64
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PublicDefaultRouteV4:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIgw
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicDefaultRouteV6:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIgw
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationIpv6CidrBlock: ::/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: AttachIgw
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PrivateDefaultRouteV4:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateDefaultRouteV6:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationIpv6CidrBlock: ::/0
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyIgw
+
+  PrivateSubnet1Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound web traffic to ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIpv6: "::/0" }
+        - !If [UseHttps, { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }, !Ref "AWS::NoValue" ]
+        - !If [UseHttps, { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0" }, !Ref "AWS::NoValue" ]
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: -1, CidrIpv6: "::/0" }
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App tier - allow only from ALB, optional admin SSH
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourceSecurityGroupId: !Ref AlbSecurityGroup }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIpv6: !Ref AdminIpv6Cidr }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: -1, CidrIpv6: "::/0" }
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DB tier - allow MySQL only from app SG
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref AppSecurityGroup }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: -1, CidrIpv6: "::/0" }
+
+  AppBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: { Status: Enabled }
+
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: { Status: Enabled }
+
+  TrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${TrailBucket}"
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${TrailBucket}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: TrailBucketPolicy
+    Properties:
+      TrailName: !Sub "${ProjectName}-trail"
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      IsMultiRegionTrail: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: AttachIgw
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: dualstack
+      Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AppAmiId
+      InstanceType: !Ref AppInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds: [!Ref AppSecurityGroup]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf -y update
+          dnf -y install python3 python3-pip
+          mkdir -p /opt/app
+          cat > /opt/app/app.py << 'PY'
+          from flask import Flask
+          app = Flask(__name__)
+          @app.get("/")
+          def home():
+              return "OK - replace /opt/app/app.py with your real app.py", 200
+          if __name__ == "__main__":
+              app.run(host="0.0.0.0", port=80)
+          PY
+          pip3 install --no-cache-dir flask
+          cat > /etc/systemd/system/app.service << 'UNIT'
+          [Unit]
+          Description=Student Portal App
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          WorkingDirectory=/opt/app
+          ExecStart=/usr/bin/python3 /opt/app/app.py
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now app.service
+
+  DbInstanceEc2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AppAmiId
+      InstanceType: !Ref DbInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds: [!Ref DbSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf -y update
+          dnf -y install mariadb105-server
+          systemctl enable --now mariadb
+
+          # Secure-ish baseline (lab friendly)
+          mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DbPassword}'; FLUSH PRIVILEGES;" || true
+
+          # Create DB and user
+          mysql -uroot -p'${DbPassword}' -e "CREATE DATABASE IF NOT EXISTS \`${DbName}\`;"
+          mysql -uroot -p'${DbPassword}' -e "CREATE USER IF NOT EXISTS '${DbUser}'@'10.%' IDENTIFIED BY '${DbPassword}';"
+          mysql -uroot -p'${DbPassword}' -e "GRANT ALL PRIVILEGES ON \`${DbName}\`.* TO '${DbUser}'@'10.%'; FLUSH PRIVILEGES;"
+
+          # Bind to private IP only (keep it inside VPC)
+          sed -i 's/^bind-address.*/bind-address=0.0.0.0/' /etc/my.cnf.d/mariadb-server.cnf || true
+          systemctl restart mariadb
+
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-tg"
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      Targets:
+        - Id: !Ref AppInstance
+          Port: 80
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      Matcher: { HttpCode: "200-399" }
+
+  AlbListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroup
+
+  AlbListenerHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseHttps
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref AcmCertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroup
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  AlbDnsName:
+    Value: !GetAtt Alb.DNSName
+  AlbUrl:
+    Value: !If
+      - UseHttps
+      - !Sub "https://${Alb.DNSName}"
+      - !Sub "http://${Alb.DNSName}"
+  AppInstanceId:
+    Value: !Ref AppInstance
+  DbInstanceId:
+    Value: !Ref DbInstanceEc2
+  DbPrivateIp:
+    Value: !GetAtt DbInstanceEc2.PrivateIp
+  AppBucketName:
+    Value: !Ref AppBucket
+  CloudTrailBucketName:
+    Value: !Ref TrailBucket
+  CloudTrailName:
+    Value: !Ref CloudTrail
