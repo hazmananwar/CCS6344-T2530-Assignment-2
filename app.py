@@ -2,12 +2,12 @@
 """
 Student Project Portal (Flask) — app.py
 
-Works well for your CloudFormation setup:
+Designed for your CloudFormation setup:
 - App EC2 (private subnet) runs this Flask app behind the ALB.
 - DB EC2 (private subnet) runs MariaDB/MySQL.
 
-What you need to set on the App EC2 (environment variables):
-  DB_HOST=<DbPrivateIp from stack outputs>
+Environment variables expected on the App EC2:
+  DB_HOST=<DbPrivateIp from stack outputs>   (or injected via CFN UserData)
   DB_NAME=studentdb
   DB_USER=studentuser
   DB_PASSWORD=<your password>
@@ -17,18 +17,17 @@ Optional:
   PORT=80
   LOG_LEVEL=INFO
 
-Notes:
-- Roles used in templates:
-    1 = Admin
-    2 = Supervisor/Lecturer
-    3 = Student
-- “uploads_allowed” is implemented as a DB setting (TRUE/FALSE) controlled by admin via /toggle_security.
-- Templates: put the HTML you pasted into files under ./templates:
-    templates/login.html
-    templates/register.html
-    templates/dashboard.html
-    templates/feedback.html
-    templates/notifications.html
+Roles:
+  1 = Admin
+  2 = Supervisor/Lecturer
+  3 = Student
+
+Templates expected:
+  templates/login.html
+  templates/register.html
+  templates/dashboard.html
+  templates/feedback.html
+  templates/notifications.html
 """
 
 import os
@@ -64,9 +63,11 @@ USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,32}$")
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = SECRET_KEY
+
+    # Cookie hardening
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-    # If you use HTTPS (ACM on ALB), you can set secure cookies:
+    # If you enable HTTPS (ACM on ALB), you can uncomment:
     # app.config["SESSION_COOKIE_SECURE"] = True
 
     CSRFProtect(app)
@@ -92,11 +93,9 @@ def create_app() -> Flask:
         # Behind ALB: X-Forwarded-For is typically set
         xff = request.headers.get("X-Forwarded-For", "")
         if xff:
-            # first is original
             ip = xff.split(",")[0].strip()
         else:
             ip = request.remote_addr or ""
-        # sanitize
         try:
             ipaddress.ip_address(ip)
             return ip
@@ -162,8 +161,8 @@ def create_app() -> Flask:
                     (key, value),
                 )
 
-    def notif_count_for_user(user_id: int, role: int) -> int:
-        # Simple rule: everyone sees global notifications (role=0) plus their own role notifications
+    def notif_count_for_user(_user_id: int, role: int) -> int:
+        # Everyone sees global notifications (role=0) plus their role notifications
         with db_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -203,7 +202,6 @@ def create_app() -> Flask:
             with conn.cursor() as cur:
                 # Projects view differs by role
                 if role == 3:
-                    # student: only their assignments
                     cur.execute(
                         """
                         SELECT a.id, a.title, a.description, a.repo_link, a.created_at,
@@ -216,7 +214,6 @@ def create_app() -> Flask:
                         (user_id,),
                     )
                 else:
-                    # staff/admin: all assignments
                     cur.execute(
                         """
                         SELECT a.id, a.title, a.description, a.repo_link, a.created_at,
@@ -228,7 +225,6 @@ def create_app() -> Flask:
                     )
                 projects = cur.fetchall()
 
-                # Milestones for all projects shown
                 milestones_map = {}
                 for p in projects:
                     assign_id = p[0]
@@ -270,6 +266,12 @@ def create_app() -> Flask:
     # ---------------------------
     # Routes
     # ---------------------------
+
+    # ALB health check endpoint
+    @app.get("/health")
+    def health():
+        return "OK", 200
+
     @app.get("/")
     def login():
         if session.get("user_id"):
@@ -347,7 +349,6 @@ def create_app() -> Flask:
                         (username, pwd_hash, role, email, phone, datetime.utcnow()),
                     )
             flash("Account created. Please sign in.")
-            # Not logged-in yet, so minimal audit
         except pymysql.err.IntegrityError:
             flash("Username already exists.")
             return redirect(url_for("register"))
@@ -470,7 +471,6 @@ def create_app() -> Flask:
 
         with db_conn() as conn:
             with conn.cursor() as cur:
-                # Load milestone -> assignment -> student_id to enforce permissions
                 cur.execute(
                     """
                     SELECT m.id, m.done, a.student_id
@@ -487,9 +487,6 @@ def create_app() -> Flask:
                 done = bool(row[1])
                 student_id = int(row[2])
 
-                # Permission:
-                # - student can toggle their own milestones
-                # - staff can toggle any
                 if role == 3 and student_id != uid:
                     abort(403)
 
@@ -500,7 +497,7 @@ def create_app() -> Flask:
         return redirect(url_for("dashboard"))
 
     @app.post("/add_milestone")
-    @require_role(3)  # your template shows add milestone form only when role == 3
+    @require_role(3)
     def add_milestone():
         uploads_allowed = get_setting("uploads_allowed", "TRUE").upper()
         if uploads_allowed != "TRUE":
@@ -513,13 +510,9 @@ def create_app() -> Flask:
             flash("Task cannot be empty.")
             return redirect(url_for("dashboard"))
 
-        # Ensure assignment belongs to student
         with db_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT student_id FROM assignments WHERE id=%s",
-                    (assign_id,),
-                )
+                cur.execute("SELECT student_id FROM assignments WHERE id=%s", (assign_id,))
                 row = cur.fetchone()
                 if not row:
                     abort(404)
@@ -555,7 +548,6 @@ def create_app() -> Flask:
 # DB bootstrap
 # ---------------------------
 def init_db():
-    # Create tables if missing + seed defaults
     conn = pymysql.connect(
         host=DB_HOST,
         user=DB_USER,
@@ -629,7 +621,7 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS notifications (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     message VARCHAR(500) NOT NULL,
-                    target_role TINYINT NOT NULL DEFAULT 0, -- 0=all, 1/2/3 specific
+                    target_role TINYINT NOT NULL DEFAULT 0,
                     created_at DATETIME NOT NULL,
                     INDEX (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -662,7 +654,6 @@ def init_db():
                 """
             )
 
-            # default setting
             cur.execute(
                 """
                 INSERT INTO settings (`key`, value) VALUES ('uploads_allowed','TRUE')
@@ -671,7 +662,6 @@ def init_db():
             )
 
             # Seed a default admin if none exists (username: admin / password: Admin@1234)
-            # Change after first login.
             cur.execute("SELECT COUNT(*) FROM users WHERE role=1")
             if int(cur.fetchone()[0]) == 0:
                 admin_user = "admin"
@@ -684,7 +674,6 @@ def init_db():
                     """,
                     (admin_user, admin_hash, "admin@local", "000", datetime.utcnow()),
                 )
-                # also seed a welcome notification
                 cur.execute(
                     """
                     INSERT INTO notifications (message, target_role, created_at)
