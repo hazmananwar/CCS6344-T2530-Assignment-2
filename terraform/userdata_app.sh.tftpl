@@ -1,0 +1,60 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf -y update
+dnf -y install python3 python3-pip git
+
+mkdir -p /opt/app /opt/app/src
+cd /opt/app/src
+
+rm -rf repo
+git clone --depth 1 --branch "${github_branch}" "${github_repo_url}" repo
+
+cp -f "repo/${app_entry_point}" /opt/app/app.py
+
+if [ -d "repo/${templates_dir}" ]; then
+  rm -rf /opt/app/templates
+  cp -R "repo/${templates_dir}" /opt/app/templates
+fi
+
+if [ -d "repo/${static_dir}" ]; then
+  rm -rf /opt/app/static
+  cp -R "repo/${static_dir}" /opt/app/static
+fi
+
+if [ -f "repo/requirements.txt" ]; then
+  pip3 install --no-cache-dir -r "repo/requirements.txt"
+else
+  pip3 install --no-cache-dir flask flask-wtf pymysql werkzeug
+fi
+
+cat > /etc/sysconfig/app << EOF
+DB_HOST=${db_host}
+DB_NAME=${db_name}
+DB_USER=${db_user}
+DB_PASSWORD=${db_password}
+FLASK_SECRET_KEY=${flask_secret_key}
+PORT=80
+LOG_LEVEL=INFO
+EOF
+chmod 600 /etc/sysconfig/app
+
+cat > /etc/systemd/system/app.service << 'UNIT'
+[Unit]
+Description=Student Project Portal App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/sysconfig/app
+ExecStart=/usr/bin/python3 /opt/app/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now app.service
