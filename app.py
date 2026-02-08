@@ -32,6 +32,7 @@ Templates expected:
 
 import os
 import re
+import time
 import ipaddress
 from datetime import datetime
 from functools import wraps
@@ -60,6 +61,188 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,32}$")
 
 
+# ---------------------------
+# DB connectivity helpers
+# ---------------------------
+def db_connect():
+    return pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        charset="utf8mb4",
+        autocommit=True,
+        cursorclass=pymysql.cursors.Cursor,
+        connect_timeout=5,
+        read_timeout=10,
+        write_timeout=10,
+    )
+
+
+def wait_for_db(max_seconds: int = 420):
+    """
+    Wait until the DB is reachable. This is important on first boot because:
+    - DB EC2 needs time to install/start mariadb
+    - Networking routes/NAT might still be coming up
+    """
+    deadline = time.time() + max_seconds
+    last_err = None
+
+    while time.time() < deadline:
+        try:
+            conn = db_connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+                return
+            finally:
+                conn.close()
+        except Exception as e:
+            last_err = e
+            time.sleep(3)
+
+    raise RuntimeError(f"DB not reachable after {max_seconds}s: {last_err}")
+
+
+# ---------------------------
+# DB bootstrap
+# ---------------------------
+def init_db():
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(32) NOT NULL UNIQUE,
+                    password_hash VARCHAR(255) NOT NULL,
+                    role TINYINT NOT NULL DEFAULT 3,
+                    email VARCHAR(255),
+                    phone VARCHAR(32),
+                    created_at DATETIME NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS assignments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    student_id INT NOT NULL,
+                    title VARCHAR(120) NOT NULL,
+                    repo_link VARCHAR(400) NOT NULL,
+                    description VARCHAR(800),
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT fk_assign_student FOREIGN KEY (student_id)
+                        REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS milestones (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    assignment_id INT NOT NULL,
+                    task VARCHAR(200) NOT NULL,
+                    done TINYINT NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT fk_ms_assign FOREIGN KEY (assignment_id)
+                        REFERENCES assignments(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    username VARCHAR(32) NOT NULL,
+                    type VARCHAR(32) NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    INDEX (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    message VARCHAR(500) NOT NULL,
+                    target_role TINYINT NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL,
+                    INDEX (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NULL,
+                    username VARCHAR(32) NOT NULL,
+                    role TINYINT NOT NULL,
+                    action VARCHAR(64) NOT NULL,
+                    details VARCHAR(500) NOT NULL,
+                    ip VARCHAR(64) NOT NULL,
+                    user_agent VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    INDEX (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    `key` VARCHAR(64) PRIMARY KEY,
+                    value VARCHAR(64) NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+
+            cur.execute(
+                """
+                INSERT INTO settings (`key`, value) VALUES ('uploads_allowed','TRUE')
+                ON DUPLICATE KEY UPDATE value=value
+                """
+            )
+
+            # Seed a default admin if none exists (username: admin / password: Admin@1234)
+            cur.execute("SELECT COUNT(*) FROM users WHERE role=1")
+            if int(cur.fetchone()[0]) == 0:
+                admin_user = "admin"
+                admin_pass = "Admin@1234"
+                admin_hash = generate_password_hash(admin_pass)
+                cur.execute(
+                    """
+                    INSERT INTO users (username, password_hash, role, email, phone, created_at)
+                    VALUES (%s,%s,1,%s,%s,%s)
+                    """,
+                    (admin_user, admin_hash, "admin@local", "000", datetime.utcnow()),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO notifications (message, target_role, created_at)
+                    VALUES (%s, 0, %s)
+                    """,
+                    (
+                        "Welcome to the Student Project Portal. Default admin: admin / Admin@1234 (change it).",
+                        datetime.utcnow(),
+                    ),
+                )
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# App factory
+# ---------------------------
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = SECRET_KEY
@@ -72,26 +255,20 @@ def create_app() -> Flask:
 
     CSRFProtect(app)
 
+    # Wait DB, then bootstrap schema
     with app.app_context():
+        wait_for_db()
         init_db()
 
     # --------------
     # Helpers
     # --------------
     def db_conn():
-        return pymysql.connect(
-            host=DB_HOST,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            charset="utf8mb4",
-            cursorclass=pymysql.cursors.Cursor,
-            autocommit=True,
-        )
+        return db_connect()
 
     def client_ip() -> str:
         # Behind ALB: X-Forwarded-For is typically set
-        xff = request.headers.get("X-Forwarded-For", "")
+        xff = (request.headers.get("X-Forwarded-For", "") or "")[:200]
         if xff:
             ip = xff.split(",")[0].strip()
         else:
@@ -131,7 +308,7 @@ def create_app() -> Flask:
             uid, uname, role = None, "anonymous", 0
 
         ip = client_ip()
-        ua = request.headers.get("User-Agent", "")[:255]
+        ua = (request.headers.get("User-Agent", "") or "")[:255]
 
         with db_conn() as conn:
             with conn.cursor() as cur:
@@ -162,7 +339,6 @@ def create_app() -> Flask:
                 )
 
     def notif_count_for_user(_user_id: int, role: int) -> int:
-        # Everyone sees global notifications (role=0) plus their role notifications
         with db_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -542,147 +718,6 @@ def create_app() -> Flask:
         return "404 Not Found", 404
 
     return app
-
-
-# ---------------------------
-# DB bootstrap
-# ---------------------------
-def init_db():
-    conn = pymysql.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        charset="utf8mb4",
-        autocommit=True,
-        cursorclass=pymysql.cursors.Cursor,
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    username VARCHAR(32) NOT NULL UNIQUE,
-                    password_hash VARCHAR(255) NOT NULL,
-                    role TINYINT NOT NULL DEFAULT 3,
-                    email VARCHAR(255),
-                    phone VARCHAR(32),
-                    created_at DATETIME NOT NULL
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS assignments (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    student_id INT NOT NULL,
-                    title VARCHAR(120) NOT NULL,
-                    repo_link VARCHAR(400) NOT NULL,
-                    description VARCHAR(800),
-                    created_at DATETIME NOT NULL,
-                    CONSTRAINT fk_assign_student FOREIGN KEY (student_id)
-                        REFERENCES users(id) ON DELETE CASCADE
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS milestones (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    assignment_id INT NOT NULL,
-                    task VARCHAR(200) NOT NULL,
-                    done TINYINT NOT NULL DEFAULT 0,
-                    created_at DATETIME NOT NULL,
-                    CONSTRAINT fk_ms_assign FOREIGN KEY (assignment_id)
-                        REFERENCES assignments(id) ON DELETE CASCADE
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NOT NULL,
-                    username VARCHAR(32) NOT NULL,
-                    type VARCHAR(32) NOT NULL,
-                    message TEXT NOT NULL,
-                    created_at DATETIME NOT NULL,
-                    INDEX (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS notifications (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    message VARCHAR(500) NOT NULL,
-                    target_role TINYINT NOT NULL DEFAULT 0,
-                    created_at DATETIME NOT NULL,
-                    INDEX (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS audit_logs (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NULL,
-                    username VARCHAR(32) NOT NULL,
-                    role TINYINT NOT NULL,
-                    action VARCHAR(64) NOT NULL,
-                    details VARCHAR(500) NOT NULL,
-                    ip VARCHAR(64) NOT NULL,
-                    user_agent VARCHAR(255) NOT NULL,
-                    created_at DATETIME NOT NULL,
-                    INDEX (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS settings (
-                    `key` VARCHAR(64) PRIMARY KEY,
-                    value VARCHAR(64) NOT NULL
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-
-            cur.execute(
-                """
-                INSERT INTO settings (`key`, value) VALUES ('uploads_allowed','TRUE')
-                ON DUPLICATE KEY UPDATE value=value
-                """
-            )
-
-            # Seed a default admin if none exists (username: admin / password: Admin@1234)
-            cur.execute("SELECT COUNT(*) FROM users WHERE role=1")
-            if int(cur.fetchone()[0]) == 0:
-                admin_user = "admin"
-                admin_pass = "Admin@1234"
-                admin_hash = generate_password_hash(admin_pass)
-                cur.execute(
-                    """
-                    INSERT INTO users (username, password_hash, role, email, phone, created_at)
-                    VALUES (%s,%s,1,%s,%s,%s)
-                    """,
-                    (admin_user, admin_hash, "admin@local", "000", datetime.utcnow()),
-                )
-                cur.execute(
-                    """
-                    INSERT INTO notifications (message, target_role, created_at)
-                    VALUES (%s, 0, %s)
-                    """,
-                    ("Welcome to the Student Project Portal. Default admin: admin / Admin@1234 (change it).", datetime.utcnow()),
-                )
-    finally:
-        conn.close()
 
 
 # ---------------------------
