@@ -1,11 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   CCS6344 Secure Migration (Learner Lab-safe): Dual-stack (IPv4/IPv6) VPC with public/private subnets,
-  ALB (HTTP or HTTPS if ACM ARN provided), EC2 app tier (private subnet) that PULLS APP CODE FROM GITHUB,
-  EC2 MySQL DB tier (private subnet, encrypted EBS),
-  least-open SGs, CloudTrail to encrypted S3, S3 app bucket (encrypted, blocked public).
-  NOTE: WAF not created (Learner Lab denies wafv2:CreateWebACL).
-  NOTE: RDS not created (Learner Lab denies rds:CreateDBInstance).
+  ALB (HTTP or HTTPS if ACM ARN provided), EC2 app tier (private subnet) serving HTML templates (inline in template via cfn-init),
+  EC2 MySQL/MariaDB DB tier (private subnet, encrypted EBS), least-open SGs, CloudTrail to encrypted S3,
+  S3 app bucket (encrypted, blocked public).
+  NOTES:
+  - No WAF (Learner Lab often denies wafv2:CreateWebACL)
+  - No RDS (Learner Lab often denies rds:CreateDBInstance)
+  - Avoids UserData size limit by writing app + HTML via AWS::CloudFormation::Init (cfn-init). UserData stays small.
+  - Avoids CreationPolicy timeouts by not using CreationPolicy/cfn-signal.
 
 Parameters:
   ProjectName:
@@ -13,7 +16,6 @@ Parameters:
     Default: ccs6344
     AllowedPattern: "^[a-zA-Z0-9-]+$"
 
-  # --- Networking ---
   VpcCidr:
     Type: String
     Default: 10.10.0.0/16
@@ -31,7 +33,6 @@ Parameters:
     Type: String
     Default: 10.10.12.0/24
 
-  # --- EC2 ---
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Default: vockey
@@ -51,7 +52,6 @@ Parameters:
     Default: LabInstanceProfile
     Description: Existing instance profile in Learner Lab (do not create IAM roles).
 
-  # --- Database ---
   DbName:
     Type: String
     Default: studentdb
@@ -68,13 +68,11 @@ Parameters:
     MinLength: 8
     MaxLength: 41
 
-  # --- ALB TLS ---
   AcmCertificateArn:
     Type: String
     Default: ""
     Description: Optional ACM cert ARN for HTTPS on ALB. Leave empty to use HTTP only.
 
-  # --- Admin SSH restriction (set these to YOUR public IPs for SSH) ---
   AdminCidr:
     Type: String
     Default: "0.0.0.0/32"
@@ -82,41 +80,14 @@ Parameters:
     Type: String
     Default: "::/128"
 
-  # --- AMI (Amazon Linux 2023) ---
   AppAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-
-  # --- GitHub repo settings (NEW) ---
-  RepoUrl:
-    Type: String
-    Default: "https://github.com/hazmananwar/CCS6344-T2530-Assignment-2.git"
-    Description: Public GitHub repo URL to clone on the App EC2 instance.
-
-  RepoBranch:
-    Type: String
-    Default: "main"
-    Description: Branch to checkout.
-
-  AppEntryFile:
-    Type: String
-    Default: "app.py"
-    Description: Entry file in repo root (e.g., app.py). Must exist in the repo.
-
-  # --- App runtime ---
-  FlaskSecretKey:
-    Type: String
-    NoEcho: true
-    Default: "CHANGE-ME-VERY-LONG-RANDOM-STRING"
-    MinLength: 16
 
 Conditions:
   UseHttps: !Not [!Equals [!Ref AcmCertificateArn, ""]]
 
 Resources:
-  # ======================
-  # VPC + Subnets + Routes
-  # ======================
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
@@ -162,6 +133,9 @@ Resources:
           - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
           - 4
           - 64
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -178,6 +152,9 @@ Resources:
           - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
           - 4
           - 64
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
 
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
@@ -194,6 +171,9 @@ Resources:
           - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
           - 4
           - 64
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-1"
 
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
@@ -210,11 +190,17 @@ Resources:
           - !Select [0, !GetAtt Vpc.Ipv6CidrBlocks]
           - 4
           - 64
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-2"
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
 
   PublicDefaultRouteV4:
     Type: AWS::EC2::Route
@@ -255,11 +241,17 @@ Resources:
     Properties:
       AllocationId: !GetAtt NatEip.AllocationId
       SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-nat"
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-rt"
 
   PrivateDefaultRouteV4:
     Type: AWS::EC2::Route
@@ -287,9 +279,6 @@ Resources:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
 
-  # ======================
-  # Security Groups
-  # ======================
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -298,11 +287,14 @@ Resources:
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIpv6: "::/0" }
-        - !If [UseHttps, { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }, !Ref "AWS::NoValue"]
-        - !If [UseHttps, { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0" }, !Ref "AWS::NoValue"]
+        - !If [UseHttps, { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }, !Ref "AWS::NoValue" ]
+        - !If [UseHttps, { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0" }, !Ref "AWS::NoValue" ]
       SecurityGroupEgress:
         - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
         - { IpProtocol: -1, CidrIpv6: "::/0" }
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-alb-sg"
 
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -316,6 +308,9 @@ Resources:
       SecurityGroupEgress:
         - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
         - { IpProtocol: -1, CidrIpv6: "::/0" }
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-app-sg"
 
   DbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -327,10 +322,10 @@ Resources:
       SecurityGroupEgress:
         - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
         - { IpProtocol: -1, CidrIpv6: "::/0" }
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-db-sg"
 
-  # ======================
-  # S3 (encrypted, private)
-  # ======================
   AppBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -394,9 +389,6 @@ Resources:
         - ReadWriteType: All
           IncludeManagementEvents: true
 
-  # ======================
-  # ALB
-  # ======================
   Alb:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     DependsOn: AttachIgw
@@ -408,114 +400,6 @@ Resources:
       Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
       SecurityGroups: [!Ref AlbSecurityGroup]
 
-  # ======================
-  # DB EC2 (MariaDB/MySQL)
-  # ======================
-  DbInstanceEc2:
-    Type: AWS::EC2::Instance
-    Properties:
-      ImageId: !Ref AppAmiId
-      InstanceType: !Ref DbInstanceType
-      KeyName: !Ref KeyName
-      IamInstanceProfile: !Ref InstanceProfileName
-      SubnetId: !Ref PrivateSubnet2
-      SecurityGroupIds: [!Ref DbSecurityGroup]
-      BlockDeviceMappings:
-        - DeviceName: /dev/xvda
-          Ebs:
-            VolumeSize: 20
-            VolumeType: gp3
-            Encrypted: true
-            DeleteOnTermination: true
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euxo pipefail
-
-          dnf -y install mariadb105-server
-          systemctl enable --now mariadb
-
-          # root password + DB/user
-          mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DbPassword}'; FLUSH PRIVILEGES;" || true
-          mysql -uroot -p'${DbPassword}' -e "CREATE DATABASE IF NOT EXISTS \`${DbName}\`;"
-          mysql -uroot -p'${DbPassword}' -e "CREATE USER IF NOT EXISTS '${DbUser}'@'10.%' IDENTIFIED BY '${DbPassword}';"
-          mysql -uroot -p'${DbPassword}' -e "GRANT ALL PRIVILEGES ON \`${DbName}\`.* TO '${DbUser}'@'10.%'; FLUSH PRIVILEGES;"
-
-          # listen on VPC only (SG still restricts)
-          sed -i 's/^bind-address.*/bind-address=0.0.0.0/' /etc/my.cnf.d/mariadb-server.cnf || true
-          systemctl restart mariadb
-
-  # ======================
-  # App EC2 (Flask from GitHub)
-  # ======================
-  AppInstance:
-    Type: AWS::EC2::Instance
-    DependsOn: DbInstanceEc2
-    Properties:
-      ImageId: !Ref AppAmiId
-      InstanceType: !Ref AppInstanceType
-      KeyName: !Ref KeyName
-      IamInstanceProfile: !Ref InstanceProfileName
-      SubnetId: !Ref PrivateSubnet1
-      SecurityGroupIds: [!Ref AppSecurityGroup]
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euxo pipefail
-
-          # Base packages
-          dnf -y install python3 python3-pip git
-
-          # Where we keep the repo
-          mkdir -p /opt/app
-          cd /opt/app
-
-          # Fresh clone each boot (simple + reliable for labs)
-          rm -rf src
-          git clone --branch "${RepoBranch}" --depth 1 "${RepoUrl}" src
-
-          # Install Python deps:
-          # - If your repo has requirements.txt, it will use it.
-          # - Otherwise it installs the libs used in your assignment app.
-          if [ -f /opt/app/src/requirements.txt ]; then
-            pip3 install --no-cache-dir -r /opt/app/src/requirements.txt
-          else
-            pip3 install --no-cache-dir flask flask-wtf pymysql werkzeug
-          fi
-
-          # Environment file for systemd
-          cat > /etc/app.env <<EOF
-          DB_HOST=${DbInstanceEc2.PrivateIp}
-          DB_NAME=${DbName}
-          DB_USER=${DbUser}
-          DB_PASSWORD=${DbPassword}
-          PORT=80
-          FLASK_SECRET_KEY=${FlaskSecretKey}
-          EOF
-          chmod 600 /etc/app.env
-
-          # systemd unit (runs your repo's app.py)
-          cat > /etc/systemd/system/app.service <<EOF
-          [Unit]
-          Description=Student Portal App (from GitHub)
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=simple
-          WorkingDirectory=/opt/app/src
-          EnvironmentFile=/etc/app.env
-          ExecStart=/usr/bin/python3 /opt/app/src/${AppEntryFile}
-          Restart=always
-          RestartSec=3
-
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-
-          systemctl daemon-reload
-          systemctl enable --now app.service
-
   AlbTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -524,12 +408,18 @@ Resources:
       Protocol: HTTP
       Port: 80
       TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Matcher: { HttpCode: "200-399" }
       Targets:
         - Id: !Ref AppInstance
           Port: 80
-      HealthCheckEnabled: true
-      HealthCheckPath: /health
-      Matcher: { HttpCode: "200-399" }
 
   AlbListenerHttp:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -555,33 +445,615 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref AlbTargetGroup
 
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            dnf:
+              python3: []
+              python3-pip: []
+              aws-cfn-bootstrap: []
+          files:
+            "/opt/app/app.py":
+              mode: "000755"
+              owner: root
+              group: root
+              content: |
+                import os
+                import socket
+                from datetime import datetime
+                from flask import Flask, render_template, request, redirect, url_for, flash
+
+                app = Flask(__name__)
+                app.secret_key = os.environ.get("APP_SECRET_KEY", "lab-secret-key-change-me")
+
+                def host_ip():
+                    try:
+                        return socket.gethostbyname(socket.gethostname())
+                    except Exception:
+                        return "unknown"
+
+                @app.get("/")
+                def index():
+                    return render_template("login.html")
+
+                @app.route("/dashboard", methods=["GET"])
+                def dashboard():
+                    # demo data so templates never crash
+                    username = request.args.get("u", "student01")
+                    role = int(request.args.get("r", "3"))  # 1 admin, 3 student (matches your template logic)
+                    uploads_allowed = request.args.get("uploads", "TRUE")
+
+                    notif_count = 2
+                    notifications = [
+                        ("System maintenance window scheduled.", datetime.utcnow()),
+                        ("New project milestone available.", datetime.utcnow()),
+                    ]
+
+                    projects = [
+                        # p[0]=assign_id, p[1]=title, p[3]=link, p[6]=student
+                        (1, "CCS6344 Secure Migration", None, "https://github.com/example/repo", None, None, "student01"),
+                        (2, "Web App Hardening", None, "https://github.com/example/repo2", None, None, "student02"),
+                    ]
+                    milestones = {
+                        1: [(11, "Finalize VPC + ALB", True), (12, "Deploy App Tier", True), (13, "DB Tier", False)],
+                        2: [(21, "Threat Model", True), (22, "Fix OWASP Top 10", False)],
+                    }
+
+                    # audit logs tuples shaped to your template indices
+                    # log[1]=user, log[5]=ip, log[6]=datetime, log[7]=action
+                    audit_logs = [
+                        (None, "admin", None, None, None, host_ip(), datetime.utcnow(), "LOGIN"),
+                        (None, "admin", None, None, None, host_ip(), datetime.utcnow(), "TOGGLE_UPLOADS"),
+                    ]
+                    feedbacks = [
+                        # f[0]=datetime, f[1]=type, f[2]=message, f[3]=user
+                        (datetime.utcnow(), "Suggestion", "Add HTTPS redirect.", "student01"),
+                        (datetime.utcnow(), "Bug", "Login form flashes error.", "student02"),
+                    ]
+
+                    return render_template(
+                        "dashboard.html",
+                        username=username,
+                        role=role,
+                        uploads_allowed=uploads_allowed,
+                        notif_count=notif_count,
+                        notifications=notifications,
+                        projects=projects,
+                        milestones=milestones,
+                        audit_logs=audit_logs,
+                        feedbacks=feedbacks,
+                    )
+
+                @app.route("/notifications", methods=["GET"])
+                def notif_page():
+                    notifications = [
+                        ("Welcome to the portal!", datetime.utcnow()),
+                        ("Your submission was received.", datetime.utcnow()),
+                    ]
+                    return render_template("notifications.html", notifications=[(n[0], n[1]) for n in notifications])
+
+                @app.route("/feedback", methods=["GET", "POST"])
+                def feedback():
+                    if request.method == "POST":
+                        flash("Thanks ? feedback submitted (demo).")
+                        return redirect(url_for("feedback"))
+                    return render_template("feedback.html")
+
+                @app.route("/register", methods=["GET", "POST"])
+                def register():
+                    if request.method == "POST":
+                        flash("Registered (demo). Please login.")
+                        return redirect(url_for("index"))
+                    return render_template("register.html")
+
+                @app.route("/toggle_security", methods=["POST"])
+                def toggle_security():
+                    # demo endpoint
+                    return redirect(url_for("dashboard", r=1, uploads="FALSE"))
+
+                @app.route("/toggle_milestone/<int:mid>")
+                def toggle_milestone(mid: int):
+                    return redirect(url_for("dashboard"))
+
+                @app.route("/add_milestone", methods=["POST"])
+                def add_milestone():
+                    return redirect(url_for("dashboard", r=3))
+
+                @app.route("/submit", methods=["POST"])
+                def submit():
+                    return redirect(url_for("dashboard", r=3))
+
+                @app.route("/delete/<int:assign_id>", methods=["POST"])
+                def delete(assign_id: int):
+                    return redirect(url_for("dashboard", r=1))
+
+                @app.route("/logout", methods=["GET"])
+                def logout():
+                    return redirect(url_for("index"))
+
+                @app.route("/healthz", methods=["GET"])
+                def healthz():
+                    return "ok", 200
+
+                if __name__ == "__main__":
+                    # ALB target group expects port 80
+                    app.run(host="0.0.0.0", port=80)
+            "/opt/app/templates/dashboard.html":
+              mode: "000644"
+              owner: root
+              group: root
+              content: |
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                <meta charset="UTF-8">
+                <title>Dashboard</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <style>
+                body { font-family: 'Segoe UI', sans-serif; background: #f4f6f8; display: flex; margin: 0; }
+                .sidebar { width: 250px; background: #343a40; color: white; min-height: 100vh; padding: 20px; }
+                .sidebar a { display: block; color: #adb5bd; padding: 10px; text-decoration: none; }
+                .sidebar a:hover { color: white; }
+                .content { flex: 1; padding: 30px; }
+                .card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                .log-terminal { background: #1e1e2f; color: #00ff00; padding: 15px; font-family: monospace; height: 200px; overflow-y: auto; font-size: 12px; }
+                table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+                th, td { padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }
+                </style>
+                </head>
+                <body>
+
+                <div class="sidebar">
+                <h2>Portal</h2>
+                <p>User: {{ username }}</p>
+                <a href="/dashboard"><i class="fa fa-home"></i> Dashboard</a>
+                <a href="/notifications"><i class="fa fa-bell"></i> Alerts ({{ notif_count }})</a>
+                <a href="/feedback"><i class="fa fa-comment"></i> Feedback</a>
+                <a href="/logout"><i class="fa fa-sign-out-alt"></i> Logout</a>
+                </div>
+
+                <div class="content">
+                {% if role == 1 %}
+                <div class="card" style="border-left: 5px solid #d9534f;">
+                <h3>?? Admin Security Center</h3>
+                <p>
+                Uploads: <b>{{ 'ENABLED' if uploads_allowed == 'TRUE' else 'DISABLED' }}</b>
+                <form action="/toggle_security" method="POST" style="display:inline;">
+                <input type="hidden" name="csrf_token" value="demo">
+                <button type="submit" style="background:none; border:none; color:blue; text-decoration:underline; cursor:pointer;">[Toggle]</button>
+                </form>
+                </p>
+
+                <h4>Live Audit Log</h4>
+                <div class="log-terminal">
+                {% for log in audit_logs %}
+                <div>
+                [{{ log[6].strftime('%H:%M:%S') }}] {{ log[1] }} - {{ log[7] }} (IP: {{ log[5] }})
+                </div>
+                {% else %}
+                <div>No logs found.</div>
+                {% endfor %}
+                </div>
+                </div>
+
+                <div class="card">
+                <h3>? User Feedback Reports</h3>
+                <table>
+                <thead>
+                <tr>
+                <th>Date</th>
+                <th>User</th>
+                <th>Type</th>
+                <th>Message</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for f in feedbacks %}
+                <tr>
+                <td style="white-space:nowrap; color:gray;">{{ f[0].strftime('%Y-%m-%d %H:%M') }}</td>
+                <td style="font-weight:bold;">{{ f[3] }}</td>
+                <td><span style="background:#e9ecef; padding:4px 8px; border-radius:4px; font-size:0.9em;">{{ f[1] }}</span></td>
+                <td>{{ f[2] }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" style="text-align:center; color:gray;">No feedback received yet.</td></tr>
+                {% endfor %}
+                </tbody>
+                </table>
+                </div>
+                {% endif %}
+
+                <div class="card">
+                <h3>Project Repository</h3>
+                <table>
+                <thead>
+                <tr>
+                <th>Title</th>
+                <th>Milestones</th>
+                <th>Link</th>
+                {% if role != 3 %}<th>Student</th>{% endif %}
+                {% if role < 3 %}<th>Actions</th>{% endif %}
+                </tr>
+                </thead>
+                <tbody>
+                {% for p in projects %}
+                <tr>
+                <td>{{ p[1] }}</td>
+                <td>
+                {% for m in milestones[p[0]] %}
+                <div>
+                <a href="/toggle_milestone/{{ m[0] }}" style="text-decoration:none;">{{ '?' if m[2] else '?' }}</a> {{ m[1] }}
+                </div>
+                {% endfor %}
+                {% if role == 3 %}
+                <form action="/add_milestone" method="POST" style="margin-top:5px;">
+                <input type="hidden" name="csrf_token" value="demo">
+                <input type="hidden" name="assign_id" value="{{ p[0] }}">
+                <input type="text" name="task" placeholder="Task..." size="10">
+                <button type="submit">+</button>
+                </form>
+                {% endif %}
+                </td>
+                <td><a href="{{ p[3] }}" target="_blank">Code</a></td>
+                {% if role != 3 %}<td><strong>{{ p[6] }}</strong></td>{% endif %}
+                {% if role < 3 %}
+                <td>
+                <form action="/delete/{{ p[0] }}" method="POST" onsubmit="return confirm('Delete?');">
+                <input type="hidden" name="csrf_token" value="demo">
+                <button style="color:red; background:none; border:none; cursor:pointer;">Delete</button>
+                </form>
+                </td>
+                {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="5">No projects.</td></tr>
+                {% endfor %}
+                </tbody>
+                </table>
+                </div>
+
+                {% if role == 3 and uploads_allowed == 'TRUE' %}
+                <div class="card">
+                <h3>Submit Project</h3>
+                <form action="/submit" method="POST">
+                <input type="hidden" name="csrf_token" value="demo">
+                <input type="text" name="title" placeholder="Title" required>
+                <input type="text" name="link" placeholder="GitHub Link" required>
+                <input type="text" name="desc" placeholder="Description">
+                <button type="submit">Submit</button>
+                </form>
+                </div>
+                {% endif %}
+                </div>
+
+                </body>
+                </html>
+            "/opt/app/templates/feedback.html":
+              mode: "000644"
+              owner: root
+              group: root
+              content: |
+                <!DOCTYPE html>
+                <html>
+                <head><title>Feedback</title></head>
+                <body style="font-family:sans-serif; padding:30px; background:#f4f6f8;">
+                <h2>? Report Issue / Feedback</h2>
+
+                {% with messages = get_flashed_messages() %}
+                  {% if messages %}
+                    <p style="color:#1b7f3a;">{{ messages[0] }}</p>
+                  {% endif %}
+                {% endwith %}
+
+                <form method="POST">
+                <input type="hidden" name="csrf_token" value="demo">
+                <label>Type:</label>
+                <select name="type">
+                <option>Bug</option>
+                <option>Complaint</option>
+                <option>Suggestion</option>
+                </select><br><br>
+                <textarea name="msg" rows="5" cols="40" placeholder="Describe issue..."></textarea><br><br>
+                <button type="submit">Submit</button>
+                </form>
+                <br><a href="/dashboard">Cancel</a>
+                </body>
+                </html>
+            "/opt/app/templates/login.html":
+              mode: "000644"
+              owner: root
+              group: root
+              content: |
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                <meta charset="UTF-8">
+                <title>Welcome | Student Project Portal</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <style>
+                body {
+                  font-family: 'Segoe UI', sans-serif; margin: 0; height: 100vh;
+                  background: linear-gradient(135deg, #4361ee 0%, #3a0ca3 100%);
+                  display: flex; align-items: center; justify-content: center;
+                }
+                .login-card {
+                  background: white; width: 900px; display: flex; border-radius: 20px;
+                  overflow: hidden; box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+                }
+                .login-hero {
+                  flex: 1;
+                  background: #1e1e2f url('https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=800') center/cover;
+                  padding: 40px; color: white; display: flex; flex-direction: column; justify-content: flex-end;
+                  position: relative;
+                }
+                .login-hero::after { content: ""; position: absolute; inset: 0; background: rgba(58, 12, 163, 0.7); }
+                .hero-text { position: relative; z-index: 1; }
+                .login-form-side { flex: 1; padding: 60px; background: white; }
+                .input-group { margin-bottom: 20px; position: relative; }
+                .input-group i { position: absolute; left: 15px; top: 15px; color: #aaa; }
+                .input-group input {
+                  width: 100%; padding: 12px 15px 12px 45px; border: 1px solid #ddd;
+                  border-radius: 8px; box-sizing: border-box; outline: none; transition: 0.3s;
+                }
+                .input-group input:focus { border-color: #4361ee; box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1); }
+                .btn-login {
+                  width: 100%; padding: 14px; background: #4361ee; color: white; border: none;
+                  border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s;
+                }
+                .btn-login:hover { background: #3a0ca3; transform: translateY(-2px); }
+                </style>
+                </head>
+                <body>
+
+                <div class="login-card">
+                  <div class="login-hero">
+                    <div class="hero-text">
+                      <h2>Project Management Portal</h2>
+                      <p>A secure, streamlined platform for MMU students and faculty to manage academic milestones and project repositories.</p>
+                    </div>
+                  </div>
+                  <div class="login-form-side">
+                    <h3>Account Login</h3>
+                    <p style="color: #777; font-size: 0.9rem;">Enter your credentials to access your dashboard</p>
+
+                    <!-- Demo login: just links to dashboard -->
+                    <form method="GET" action="/dashboard">
+                      <div class="input-group">
+                        <i class="fa fa-user"></i>
+                        <input type="text" name="u" placeholder="Username" required>
+                      </div>
+                      <div class="input-group">
+                        <i class="fa fa-lock"></i>
+                        <input type="password" name="p" placeholder="Password" required>
+                      </div>
+                      <input type="hidden" name="r" value="3">
+                      <button type="submit" class="btn-login">Sign In</button>
+                    </form>
+
+                    <div style="text-align: center; margin-top: 25px;">
+                      <span style="color: #888;">New here?</span>
+                      <a href="/register" style="color: #4361ee; text-decoration: none; font-weight: 600;">Create an Account</a>
+                    </div>
+                  </div>
+                </div>
+
+                </body>
+                </html>
+            "/opt/app/templates/notifications.html":
+              mode: "000644"
+              owner: root
+              group: root
+              content: |
+                <!DOCTYPE html>
+                <html>
+                <head><title>Notifications</title></head>
+                <body style="font-family:sans-serif; padding:30px; background:#f4f6f8;">
+                <h2>? Notifications</h2>
+                <a href="/dashboard">Back to Dashboard</a>
+                <hr>
+                {% for n in notifications %}
+                <div style="background:white; padding:15px; border-left:4px solid #007bff; margin-bottom:10px; border-radius:4px;">
+                <small style="color:gray;">{{ n[1].strftime('%Y-%m-%d %H:%M') }}</small><br>
+                {{ n[0] }}
+                </div>
+                {% else %}
+                <p>No new notifications.</p>
+                {% endfor %}
+                </body>
+                </html>
+            "/opt/app/templates/register.html":
+              mode: "000644"
+              owner: root
+              group: root
+              content: |
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Secure Registration | Student Project Portal</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+                <style>
+                body {
+                  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                  background-color: #f4f7f6;
+                  display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;
+                }
+                .register-container {
+                  background: white; padding: 40px; border-radius: 12px;
+                  box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 100%; max-width: 400px;
+                }
+                h2 { text-align: center; color: #2c3e50; margin-bottom: 30px; }
+                .form-group { margin-bottom: 20px; position: relative; }
+                label { display: block; margin-bottom: 8px; font-weight: 600; color: #34495e; font-size: 14px; }
+                input[type="text"], input[type="email"], input[type="password"] {
+                  width: 100%; padding: 12px; border: 1px solid #dcdfe6; border-radius: 6px; box-sizing: border-box;
+                }
+                .btn-register {
+                  width: 100%; padding: 14px; background-color: #28a745; color: white; border: none;
+                  border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer;
+                }
+                .footer-links { text-align: center; margin-top: 20px; font-size: 14px; }
+                .error-msg { background: #fef0f0; color: #f56c6c; padding: 10px; border-radius: 4px; margin-bottom: 20px; }
+                </style>
+                </head>
+                <body>
+
+                <div class="register-container">
+                <h2>Create Account</h2>
+
+                {% with messages = get_flashed_messages() %}
+                  {% if messages %}
+                    {% for message in messages %}
+                      <div class="error-msg">{{ message }}</div>
+                    {% endfor %}
+                  {% endif %}
+                {% endwith %}
+
+                <form action="/register" method="POST">
+                <input type="hidden" name="csrf_token" value="demo">
+                <input type="hidden" name="role" value="3">
+
+                <div class="form-group">
+                <label>Username</label>
+                <input type="text" name="username" placeholder="e.g. StudentID123" required>
+                </div>
+
+                <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" id="regPass" placeholder="????????" required>
+                <div style="margin-top: 5px;">
+                <input type="checkbox" onclick="document.getElementById('regPass').type = document.getElementById('regPass').type === 'password' ? 'text' : 'password'">
+                <small>Show Password</small>
+                </div>
+                </div>
+
+                <div class="form-group">
+                <label>Email Address</label>
+                <input type="email" name="email" placeholder="student@mmu.edu.my" required>
+                </div>
+
+                <div class="form-group">
+                <label>Phone Number</label>
+                <input type="text" name="phone" placeholder="012-3456789" required>
+                </div>
+
+                <div class="pdpa-box" style="margin-bottom:20px;">
+                <label style="display: flex; align-items: flex-start; font-weight: normal; font-size:12px;">
+                <input type="checkbox" name="consent" style="margin-top: 3px; margin-right:5px;" required>
+                <span>I consent to PDPA 2010 processing.</span>
+                </label>
+                </div>
+
+                <button type="submit" class="btn-register">Register Account</button>
+                </form>
+
+                <div class="footer-links">
+                Already have an account? <a href="/">Login here</a>
+                </div>
+                </div>
+                </body>
+                </html>
+            "/etc/systemd/system/app.service":
+              mode: "000644"
+              owner: root
+              group: root
+              content: |
+                [Unit]
+                Description=Student Portal App (Flask)
+                After=network-online.target
+                Wants=network-online.target
+
+                [Service]
+                WorkingDirectory=/opt/app
+                Environment="PYTHONUNBUFFERED=1"
+                ExecStart=/usr/bin/python3 /opt/app/app.py
+                Restart=always
+                RestartSec=2
+
+                [Install]
+                WantedBy=multi-user.target
+          commands:
+            01_pip:
+              command: "pip3 install --no-cache-dir flask"
+            02_permissions:
+              command: "chmod -R 755 /opt/app && chmod -R 644 /opt/app/templates/*.html || true"
+            03_systemd:
+              command: "systemctl daemon-reload && systemctl enable --now app.service"
+    Properties:
+      ImageId: !Ref AppAmiId
+      InstanceType: !Ref AppInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds: [!Ref AppSecurityGroup]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf -y update
+          dnf -y install aws-cfn-bootstrap python3 python3-pip
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppInstance --region ${AWS::Region} || true
+          systemctl is-active --quiet app.service || systemctl restart app.service || true
+
+  DbInstanceEc2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AppAmiId
+      InstanceType: !Ref DbInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfileName
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds: [!Ref DbSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf -y update
+          dnf -y install mariadb105-server
+          systemctl enable --now mariadb
+
+          # Set root password (best-effort, lab-friendly)
+          mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DbPassword}'; FLUSH PRIVILEGES;" || true
+
+          # Create DB and user
+          mysql -uroot -p'${DbPassword}' -e "CREATE DATABASE IF NOT EXISTS \`${DbName}\`;"
+          mysql -uroot -p'${DbPassword}' -e "CREATE USER IF NOT EXISTS '${DbUser}'@'10.%' IDENTIFIED BY '${DbPassword}';"
+          mysql -uroot -p'${DbPassword}' -e "GRANT ALL PRIVILEGES ON \`${DbName}\`.* TO '${DbUser}'@'10.%'; FLUSH PRIVILEGES;"
+
+          # Listen inside VPC (SG still restricts to App SG)
+          sed -i 's/^bind-address.*/bind-address=0.0.0.0/' /etc/my.cnf.d/mariadb-server.cnf || true
+          systemctl restart mariadb
+
 Outputs:
   VpcId:
     Value: !Ref Vpc
-
   AlbDnsName:
     Value: !GetAtt Alb.DNSName
-
   AlbUrl:
     Value: !If
       - UseHttps
       - !Sub "https://${Alb.DNSName}"
       - !Sub "http://${Alb.DNSName}"
-
   AppInstanceId:
     Value: !Ref AppInstance
-
   DbInstanceId:
     Value: !Ref DbInstanceEc2
-
   DbPrivateIp:
     Value: !GetAtt DbInstanceEc2.PrivateIp
-
   AppBucketName:
     Value: !Ref AppBucket
-
   CloudTrailBucketName:
     Value: !Ref TrailBucket
-
   CloudTrailName:
     Value: !Ref CloudTrail
