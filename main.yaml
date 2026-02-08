@@ -1,14 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  CCS6344 Secure Migration (Learner Lab-safe): Dual-stack (IPv4/IPv6) VPC with public/private subnets,
-  ALB (HTTP or HTTPS if ACM ARN provided), EC2 app tier (private subnet) serving HTML templates (inline in template via cfn-init),
+  CCS6344 Secure Migration (Learner Lab aws academy sandbox): Dual-stack (IPv4/IPv6) VPC with public/private subnets,
+  ALB (HTTP or HTTPS if ACM ARN provided), EC2 app tier (private subnet)
   EC2 MySQL/MariaDB DB tier (private subnet, encrypted EBS), least-open SGs, CloudTrail to encrypted S3,
   S3 app bucket (encrypted, blocked public).
   NOTES:
-  - No WAF (Learner Lab often denies wafv2:CreateWebACL)
-  - No RDS (Learner Lab often denies rds:CreateDBInstance)
-  - Avoids UserData size limit by writing app + HTML via AWS::CloudFormation::Init (cfn-init). UserData stays small.
-  - Avoids CreationPolicy timeouts by not using CreationPolicy/cfn-signal.
+  - No WAF (Learner Lab denies wafv2:CreateWebACL)
+  - No RDS (Learner Lab denies rds:CreateDBInstance)
 
 Parameters:
   ProjectName:
